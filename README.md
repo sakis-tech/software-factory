@@ -2,6 +2,8 @@
 
 Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Server läuft.
 
+> Optional: Matt Pococks Workflow, siehe [docs/pocock-workflow.md](docs/pocock-workflow.md) (Umbau aktiv in diesem Fork).
+
 > 🖥️ **Server:** Die Factory läuft auf einem Linux-VPS. Getestet ist sie auf dem **Hostinger KVM 2** (2 CPU-Kerne, 8 GB RAM) mit der Vorlage „Ubuntu 24.04 mit Claude Code“.
 > Server holen: **[hostinger.com/alexclaude](https://hostinger.com/alexclaude)**. Mit dem Code **`ALEXCLAUDE`** sparst du zusätzlich 10 %.
 > Einrichtung Schritt für Schritt: **[docs/hostinger-vps-setup.md](docs/hostinger-vps-setup.md)**

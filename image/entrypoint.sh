@@ -50,16 +50,83 @@ if [ "$PHASE" != "check" ] && [ -f .factory/setup.json ]; then
 fi
 
 export FACTORY_DEFAULT_BRANCH="$DEFAULT_BRANCH"
-log "Starte Claude Code ($MODEL, Phase: $PHASE, Workflow: $WORKFLOW) für $REPO#$ISSUE auf $BRANCH"
+MODE="${MODE:-new}"
+
+# Playbook: eigenes pro Workflow, sonst das allgemeine
+PLAYBOOK="/factory/workflows/$WORKFLOW/playbook.md"
+[ -f "$PLAYBOOK" ] || PLAYBOOK=/factory/playbook.md
+
+# Ein Claude-Code-Aufruf. Alle Aufrufe eines Laufs landen hintereinander in /work/claude.jsonl.
+run_claude() {
+  claude -p "$1" \
+    --append-system-prompt-file "$PLAYBOOK" \
+    --add-dir "/factory/workflows" \
+    --model "$MODEL" \
+    --dangerously-skip-permissions \
+    --output-format stream-json --verbose \
+    >> /work/claude.jsonl 2>> /work/claude.err < /dev/null
+}
+
+# Hat der Agent schon einen Endstand gemeldet (Rückfrage, Fehlschlag …)? Dann keinen weiteren Schritt starten.
+reported_end() {
+  local st; st=$(jq -r '.status // empty' /work/status.json 2>/dev/null || true)
+  case "$st" in question|failed|rejected|approved|accepting|review) return 0 ;; esac
+  return 1
+}
+
+# Anweisungen eines Schritts mit den Werten dieses Laufs
+step_text() { sed -e 's/\$FACTORY_DEFAULT_BRANCH/'"$DEFAULT_BRANCH"'/g' -e 's/\$ISSUE/'"$ISSUE"'/g' "/factory/workflows/$WORKFLOW/steps/$1.md"; }
+
+: > /work/claude.jsonl; : > /work/claude.err
 set +e
-claude -p "$(cat /work/prompt.md)" \
-  --append-system-prompt-file /factory/playbook.md \
-  --add-dir "/factory/workflows/$WORKFLOW" \
-  --model "$MODEL" \
-  --dangerously-skip-permissions \
-  --output-format stream-json --verbose \
-  > /work/claude.jsonl 2> /work/claude.err
-CODE=$?
+if [ "$WORKFLOW" = "pocock" ] && [ "$PHASE" = "build" ]; then
+  # Matt Pococks Skills dürfen nur per /befehl gestartet werden: die Factory ruft sie nacheinander auf, jeder Schritt mit frischem Kontext.
+  ISSUE_URL="https://github.com/$REPO/issues/$ISSUE"
+  CODE=0
+  if [ "$MODE" = "new" ] || [ "$MODE" = "retry" ]; then
+    SUBS=$(gh issue view "$ISSUE" -R "$REPO" --json subIssues --jq '.subIssues.totalCount' 2>/dev/null || echo 0)
+    if [ "${SUBS:-0}" = "0" ]; then
+      log "Schritt 1: /to-tickets"
+      factory-report architecture "Spec wird in Tickets zerlegt (/to-tickets)" >/dev/null
+      run_claude "/to-tickets $ISSUE_URL
+
+$(step_text to-tickets)
+
+$(cat /work/prompt.md)"; CODE=$?
+    fi
+    if [ $CODE -eq 0 ] && ! reported_end; then
+      log "Schritt 2: /implement-spec"
+      factory-report implementing "Tickets werden umgesetzt (/implement-spec)" >/dev/null
+      run_claude "/implement-spec $ISSUE_URL
+
+$(step_text implement-spec)
+
+$(cat /work/prompt.md)"; CODE=$?
+    fi
+  else
+    log "Schritt 2: /implement ($MODE)"
+    factory-report implementing "Befunde bzw. Änderungswunsch werden umgesetzt (/implement)" >/dev/null
+    run_claude "/implement $ISSUE_URL
+
+$(step_text implement)
+
+$(cat /work/prompt.md)"; CODE=$?
+  fi
+  if [ $CODE -eq 0 ] && ! reported_end; then
+    log "Schritt 3: Abschluss"
+    run_claude "$(cat /work/prompt.md)
+
+$(step_text finish)"; CODE=$?
+  fi
+  # Eine Gesamtzeile für den Runner: Kosten, Schritte und Dauer aller Aufrufe zusammen
+  jq -s -c '[.[] | select(.type == "result")] | {type: "result", subtype: "factory-total",
+      is_error: (map(.is_error // false) | any), num_turns: (map(.num_turns // 0) | add // 0),
+      duration_ms: (map(.duration_ms // 0) | add // 0), total_cost_usd: (map(.total_cost_usd // 0) | add // 0),
+      result: (last.result // "")}' /work/claude.jsonl >> /work/claude.jsonl 2>/dev/null
+else
+  log "Starte Claude Code ($MODEL, Phase: $PHASE, Workflow: $WORKFLOW) für $REPO#$ISSUE auf $BRANCH"
+  run_claude "$(cat /work/prompt.md)"; CODE=$?
+fi
 set -e
 log "Claude Code beendet mit Exit-Code $CODE"
 tail -n 1 /work/claude.jsonl | jq -r '"Ergebnis: " + ((.result // "-") | tostring | .[0:500])' 2>/dev/null || true

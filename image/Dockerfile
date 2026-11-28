@@ -33,6 +33,15 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # Python-Projekte: uv (verwaltet Python-Versionen und Pakete selbst)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH=/home/pwuser/.local/bin:$PATH
+# Matt Pococks Skills (github.com/mattpocock/skills, MIT-Lizenz), fester Stand für reproduzierbare Läufe.
+# Aktualisieren: Commit-Hash ändern und das Image neu bauen (factory-rollout).
+ARG MATT_SKILLS_REF=d65391149dbb5fe76478e76fa8d5122b2aa5a70e
+RUN git clone -q https://github.com/mattpocock/skills /tmp/mps \
+ && git -C /tmp/mps checkout -q "$MATT_SKILLS_REF" \
+ && mkdir -p /home/pwuser/.claude/skills \
+ && for d in /tmp/mps/skills/engineering/*/ /tmp/mps/skills/productivity/*/ /tmp/mps/skills/misc/*/; do cp -r "$d" /home/pwuser/.claude/skills/; done \
+ && cp /tmp/mps/LICENSE /home/pwuser/.claude/skills/LICENSE-mattpocock-skills \
+ && rm -rf /tmp/mps
 
 WORKDIR /work
 ENTRYPOINT ["/factory/entrypoint.sh"]

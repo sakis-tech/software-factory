@@ -35,7 +35,7 @@ export type Config = {
 };
 
 type Comment = { author: { login: string } | null; body: string; createdAt: string };
-type Issue = { number: number; title: string; body: string; url: string; labels: { name: string }[]; comments: Comment[] };
+type Issue = { number: number; title: string; body: string; url: string; labels: { name: string }[]; comments: Comment[]; parent?: { number: number } | null };
 type Container = { name: string; repo: string; issue: number; phase: Phase; mode: string; running: boolean; startedAt: string; finishedAt: string; exitCode: number };
 type Phase = "check" | "build" | "accept";
 type Mode = "new" | "answer" | "change-request" | "retry" | "rework";
@@ -203,6 +203,17 @@ export function humanCommentsSinceFactory(cfg: Config, issue: Issue): Comment[] 
   return issue.comments.slice(last + 1).filter((c) => !c.body.includes(MARK) && isTrusted(cfg, loginOf(c)));
 }
 
+async function listOpenIssues(cfg: Config, repo: string): Promise<Issue[]> {
+  const args = ["issue", "list", "-R", repo, "--label", cfg.label, "--state", "open", "--limit", "100", "--json"];
+  try { return JSON.parse(await gh([...args, "number,title,body,url,labels,comments,parent"])); }
+  catch (e) {
+    // Ältere GitHub CLI kennt das Feld "parent" noch nicht
+    if (!String(e).includes("parent")) throw e;
+    log("gh:no-parent-field", { hint: "GitHub CLI aktualisieren (ab 2.94), sonst werden Sub-Issues nicht erkannt" });
+    return JSON.parse(await gh([...args, "number,title,body,url,labels,comments"]));
+  }
+}
+
 async function findPr(repo: string, n: number, state: "open" | "merged" | "all") {
   const prs = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", `factory/${n}`, "--state", state, "--json", "number,url,state"]));
   return prs[0] as { number: number; url: string; state: string } | undefined;
@@ -315,7 +326,9 @@ export function buildPrompt(cfg: Config, repo: string, issue: Issue, phase: Phas
   const start = phase === "check"
     ? `Phase **Prüfung**: Prüfe nur, entwickle nichts. Beginne mit \`factory-report checking "..."\` und ende mit approved (vorher Testszenarien nach /scenarios/scenarios.md), question oder rejected.`
     : phase === "build"
-      ? `Phase **Bau**: Die Prüfung ist bestanden (siehe Verlauf). Beginne mit \`factory-report architecture "..."\` (bei Änderungswunsch oder Rückgabe aus der Abnahme direkt mit implementing). Ende mit built.`
+      ? cfg.workflow === "pocock"
+        ? `Phase **Bau**: Die Prüfung ist bestanden (siehe Verlauf). Die Factory steuert die Schritte; was jetzt zu tun ist, steht in den Anweisungen zu diesem Schritt.`
+        : `Phase **Bau**: Die Prüfung ist bestanden (siehe Verlauf). Beginne mit \`factory-report architecture "..."\` (bei Änderungswunsch oder Rückgabe aus der Abnahme direkt mit implementing). Ende mit built.`
       : `Phase **Abnahme**: Du bist der unabhängige Prüfer für den PR ${prUrl ?? ""}. Ende mit accepted, rework oder (nur in der letzten Runde) unresolved.`;
   return [
     `# Auftrag`,
@@ -377,7 +390,7 @@ async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mod
     "--label", "software-factory=1", "--label", `sf.repo=${repo}`, "--label", `sf.issue=${issue.number}`, "--label", `sf.phase=${phase}`, "--label", `sf.mode=${mode}`,
     ...agentLimits(cfg),
     "-e", `REPO=${repo}`, "-e", `ISSUE=${issue.number}`, "-e", `BRANCH=factory/${issue.number}`,
-    "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`,
+    "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`, "-e", `MODE=${mode}`,
     "-e", "GH_TOKEN", "-e", authVar, // Werte kommen aus der Umgebung, nicht aus der Kommandozeile
     "-v", `${dir}:/work`, ...scenarioMount,
     await imageFor(cfg, repo),
@@ -653,8 +666,9 @@ async function lostJob(cfg: Config, repo: string, issue: Issue): Promise<boolean
 }
 
 async function tickRepo(cfg: Config, repo: string, containers: Container[], slots: { free: number }) {
-  const issues: Issue[] = JSON.parse(await gh(["issue", "list", "-R", repo, "--label", cfg.label, "--state", "open",
-    "--json", "number,title,body,url,labels,comments", "--limit", "100"]));
+  const issues: Issue[] = (await listOpenIssues(cfg, repo))
+    // Sub-Issues (z. B. Tickets aus /to-tickets) sind Teil ihrer Spec und keine eigenen Aufgaben
+    .filter((i) => !i.parent);
   issues.sort((a, b) => a.number - b.number); // älteste zuerst
   const openNumbers = new Set(issues.map((i) => i.number));
 
